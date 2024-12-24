@@ -17,9 +17,8 @@ install_requires = [
     "httpx",
     "pycryptodome<4",
     "requests",
+    "mnemonic==0.20",  # 从可选依赖改为必需依赖
 ]
-
-extras_hdwallet = {"mnemonic": ["mnemonic==0.20"]}
 
 setup_kwargs = {
     "name": "tronpy",
@@ -35,9 +34,7 @@ setup_kwargs = {
     "packages": packages,
     "package_data": package_data,
     "install_requires": install_requires,
-    "extras_require": extras_hdwallet,
     "python_requires": ">=3.8",
 }
-
 
 setup(**setup_kwargs)

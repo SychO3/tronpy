@@ -3,7 +3,7 @@ import json
 import time
 from decimal import Decimal
 from pprint import pprint
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Dict, Any
 
 from tronpy import keys
 from tronpy.abi import tron_abi
@@ -290,6 +290,265 @@ class AsyncTransactionBuilder:
             return await AsyncTransaction.create(self._raw_data, client=self._client, method=self._method)
 
         return await AsyncTransaction.create(self._raw_data, client=self._client)
+
+
+# noinspection PyBroadException
+class AsyncTrx:
+    """The Trx(transaction) API."""
+
+    def __init__(self, tron):
+        self._tron = tron
+
+    @property
+    def client(self) -> "AsyncTron":
+        return self._tron
+
+    def _build_transaction(self, type_: str, obj: dict, *, method: AsyncContractMethod = None) -> AsyncTransactionBuilder:
+        inner = {
+            "parameter": {"value": obj, "type_url": f"type.googleapis.com/protocol.{type_}"},
+            "type": type_,
+        }
+        if method:
+            return AsyncTransactionBuilder(inner, client=self.client, method=method)
+        return AsyncTransactionBuilder(inner, client=self.client)
+
+    def transfer(self, from_: TAddress, to: TAddress, amount: int) -> AsyncTransactionBuilder:
+        """Transfer TRX. ``amount`` in `SUN`."""
+        return self._build_transaction(
+            "TransferContract",
+            {"owner_address": keys.to_hex_address(from_), "to_address": keys.to_hex_address(to), "amount": amount},
+        )
+
+    # TRC10 asset
+
+    def asset_transfer(self, from_: TAddress, to: TAddress, amount: int, token_id: int) -> AsyncTransactionBuilder:
+        """Transfer TRC10 tokens."""
+        return self._build_transaction(
+            "TransferAssetContract",
+            {
+                "owner_address": keys.to_hex_address(from_),
+                "to_address": keys.to_hex_address(to),
+                "amount": amount,
+                "asset_name": str(token_id).encode().hex(),
+            },
+        )
+
+    def asset_issue(
+        self,
+        owner: TAddress,
+        abbr: str,
+        total_supply: int,
+        *,
+        url: str,
+        name: str = None,
+        description: str = "",
+        start_time: int = None,
+        end_time: int = None,
+        precision: int = 6,
+        frozen_supply: list = None,
+        trx_num: int = 1,
+        num: int = 1,
+    ) -> AsyncTransactionBuilder:
+        """Issue a TRC10 token.
+
+        Almost all parameters have resonable defaults.
+        """
+        if name is None:
+            name = abbr
+
+        if start_time is None:
+            # use default expiration
+            start_time = current_timestamp() + 60_000
+
+        if end_time is None:
+            # use default expiration
+            end_time = current_timestamp() + 60_000 + 1
+
+        if frozen_supply is None:
+            frozen_supply = []
+
+        return self._build_transaction(
+            "AssetIssueContract",
+            {
+                "owner_address": keys.to_hex_address(owner),
+                "abbr": abbr.encode().hex(),
+                "name": name.encode().hex(),
+                "total_supply": total_supply,
+                "precision": precision,
+                "url": url.encode().hex(),
+                "description": description.encode().hex(),
+                "start_time": start_time,
+                "end_time": end_time,
+                "frozen_supply": frozen_supply,
+                "trx_num": trx_num,
+                "num": num,
+                "public_free_asset_net_limit": 0,
+                "free_asset_net_limit": 0,
+            },
+        )
+
+    # Account
+
+    def account_permission_update(self, owner: TAddress, perm: dict) -> "AsyncTransactionBuilder":
+        """Update account permission.
+
+        :param owner: Address of owner
+        :param perm: Permission dict from :meth:`~tronpy.Tron.get_account_permission`
+        """
+
+        if "owner" in perm:
+            for key in perm["owner"]["keys"]:
+                key["address"] = keys.to_hex_address(key["address"])
+        if "actives" in perm:
+            for act in perm["actives"]:
+                for key in act["keys"]:
+                    key["address"] = keys.to_hex_address(key["address"])
+        if perm.get("witness", None):
+            for key in perm["witness"]["keys"]:
+                key["address"] = keys.to_hex_address(key["address"])
+
+        return self._build_transaction(
+            "AccountPermissionUpdateContract",
+            dict(owner_address=keys.to_hex_address(owner), **perm),
+        )
+
+    def account_update(self, owner: TAddress, name: str) -> "AsyncTransactionBuilder":
+        """Update account name. An account can only set name once."""
+        return self._build_transaction(
+            "UpdateAccountContract",
+            {"owner_address": keys.to_hex_address(owner), "account_name": name.encode().hex()},
+        )
+
+    def freeze_balance(self, owner: TAddress, amount: int, resource: str = "ENERGY") -> "AsyncTransactionBuilder":
+        """Freeze balance to get energy or bandwidth, for 3 days.
+
+        :param resource: Resource type, can be ``"ENERGY"`` or ``"BANDWIDTH"``
+        """
+        payload = {
+            "owner_address": keys.to_hex_address(owner),
+            "frozen_balance": amount,
+            "resource": resource,
+        }
+        return self._build_transaction("FreezeBalanceV2Contract", payload)
+
+    def withdraw_stake_balance(self, owner: TAddress) -> "AsyncTransactionBuilder":
+        """Withdraw all stake v2 balance after waiting for 14 days since unfreeze_balance call.
+
+        :param owner:
+        """
+        payload = {
+            "owner_address": keys.to_hex_address(owner),
+        }
+        return self._build_transaction("WithdrawExpireUnfreezeContract", payload)
+
+    def unfreeze_balance(
+        self, owner: TAddress, resource: str = "ENERGY", *, unfreeze_balance: int
+    ) -> "AsyncTransactionBuilder":
+        """Unfreeze balance to get TRX back.
+
+        :param resource: Resource type, can be ``"ENERGY"`` or ``"BANDWIDTH"``
+        """
+        payload = {
+            "owner_address": keys.to_hex_address(owner),
+            "unfreeze_balance": unfreeze_balance,
+            "resource": resource,
+        }
+        return self._build_transaction("UnfreezeBalanceV2Contract", payload)
+
+    def unfreeze_balance_legacy(
+        self, owner: TAddress, resource: str = "ENERGY", receiver: TAddress = None
+    ) -> "AsyncTransactionBuilder":
+        """Unfreeze balance to get TRX back.
+
+        :param resource: Resource type, can be ``"ENERGY"`` or ``"BANDWIDTH"``
+        """
+        payload = {
+            "owner_address": keys.to_hex_address(owner),
+            "resource": resource,
+        }
+        if receiver is not None:
+            payload["receiver_address"] = keys.to_hex_address(receiver)
+        return self._build_transaction("UnfreezeBalanceContract", payload)
+
+    def delegate_resource(
+        self,
+        owner: TAddress,
+        receiver: TAddress,
+        balance: int,
+        resource: str = "BANDWIDTH",
+        lock: bool = False,
+        lock_period: int = None,
+    ) -> "AsyncTransactionBuilder":
+        """Delegate bandwidth or energy resources to other accounts in Stake2.0.
+
+        :param owner:
+        :param receiver:
+        :param balance:
+        :param resource: Resource type, can be ``"ENERGY"`` or ``"BANDWIDTH"``
+        :param lock: Optionally lock delegated resources for 3 days.
+        :param lock_period: Optionally lock delegated resources for a specific period. Default: 3 days.
+        """
+
+        payload = {
+            "owner_address": keys.to_hex_address(owner),
+            "receiver_address": keys.to_hex_address(receiver),
+            "balance": balance,
+            "resource": resource,
+            "lock": lock,
+        }
+        if lock_period is not None:
+            payload["lock_period"] = lock_period
+
+        return self._build_transaction("DelegateResourceContract", payload)
+
+    def undelegate_resource(
+        self, owner: TAddress, receiver: TAddress, balance: int, resource: str = "BANDWIDTH"
+    ) -> "AsyncTransactionBuilder":
+        """Cancel the delegation of bandwidth or energy resources to other accounts in Stake2.0
+
+        :param owner:
+        :param receiver:
+        :param balance:
+        :param resource: Resource type, can be ``"ENERGY"`` or ``"BANDWIDTH"``
+        """
+
+        payload = {
+            "owner_address": keys.to_hex_address(owner),
+            "receiver_address": keys.to_hex_address(receiver),
+            "balance": balance,
+            "resource": resource,
+        }
+
+        return self._build_transaction("UnDelegateResourceContract", payload)
+
+    # Witness
+
+    def create_witness(self, owner: TAddress, url: str) -> "AsyncTransactionBuilder":
+        """Create a new witness, will consume 1_000 TRX."""
+        payload = {"owner_address": keys.to_hex_address(owner), "url": url.encode().hex()}
+        return self._build_transaction("WitnessCreateContract", payload)
+
+    def vote_witness(self, owner: TAddress, *votes: Tuple[TAddress, int]) -> "AsyncTransactionBuilder":
+        """Vote for witnesses. Empty ``votes`` to clean voted."""
+        votes = [dict(vote_address=keys.to_hex_address(addr), vote_count=count) for addr, count in votes]
+        payload = {"owner_address": keys.to_hex_address(owner), "votes": votes}
+        return self._build_transaction("VoteWitnessContract", payload)
+
+    def withdraw_rewards(self, owner: TAddress) -> "AsyncTransactionBuilder":
+        """Withdraw voting rewards."""
+        payload = {"owner_address": keys.to_hex_address(owner)}
+        return self._build_transaction("WithdrawBalanceContract", payload)
+
+    # Contract
+
+    def deploy_contract(self, owner: TAddress, contract: AsyncContract) -> "AsyncTransactionBuilder":
+        """Deploy a new contract on chain."""
+        contract._client = self.client
+        contract.owner_address = owner
+        contract.origin_address = owner
+        contract.contract_address = None
+
+        return contract.deploy()
 
 
 # noinspection PyBroadException
@@ -1142,3 +1401,335 @@ class AsyncTron:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.provider.client.aclose()
+
+    async def get_usdt_balance(self, address: str) -> Decimal:
+        """查询地址的USDT余额
+
+        Args:
+            address: TRON地址
+
+        Returns:
+            Decimal: USDT余额
+        """
+        USDT_CONTRACT_ADDRESS = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        contract = await self.get_contract(USDT_CONTRACT_ADDRESS)
+        balance = await contract.functions.balanceOf(address)
+        # USDT有6位小数
+        return Decimal(balance) / Decimal(10 ** 6)
+
+    async def get_token_balance(self, token_address: str, address: str, decimals: int = 18) -> Decimal:
+        """查询任意TRC20代币余额
+
+        Args:
+            token_address: 代币合约地址
+            address: 要查询的地址
+            decimals: 代币小数位数
+
+        Returns:
+            Decimal: 代币余额
+        """
+        contract = await self.get_contract(token_address)
+        balance = await contract.functions.balanceOf(address)
+        return Decimal(balance) / Decimal(10 ** decimals)
+
+    async def get_token_info(self, token_address: str) -> dict:
+        """获取代币基本信息
+
+        Args:
+            token_address: 代币合约地址
+
+        Returns:
+            dict: 包含name, symbol, decimals的字典
+        """
+        contract = await self.get_contract(token_address)
+        name = await contract.functions.name()
+        symbol = await contract.functions.symbol()
+        decimals = await contract.functions.decimals()
+        return {
+            "name": name,
+            "symbol": symbol,
+            "decimals": decimals
+        }
+
+    async def batch_get_token_balance(self, token_address: str, addresses: list, decimals: int = 18) -> dict:
+        """批量查询多个地址的代币余额
+
+        Args:
+            token_address: 代币合约地址
+            addresses: 地址列表
+            decimals: 代币小数位数
+
+        Returns:
+            dict: 地址到余额的映射
+        """
+        contract = await self.get_contract(token_address)
+        balances = {}
+        for address in addresses:
+            balance = await contract.functions.balanceOf(address)
+            balances[address] = Decimal(balance) / Decimal(10 ** decimals)
+        return balances
+
+    async def scan_block_transfers(self, start_block: int, end_block: int = None, address: str = None) -> dict:
+        """扫描指定区块范围内的TRX和USDT转账记录
+
+        Args:
+            start_block: 起始区块
+            end_block: 结束区块，如果不指定则扫描到最新区块
+            address: 可选，只返回与该地址相关的转账记录
+
+        Returns:
+            dict: 包含区块信息和转账记录
+            {
+                'blocks': [{
+                    'block_number': 区块号,
+                    'timestamp': 时间戳,
+                    'hash': 区块哈希,
+                    'parent_hash': 父区块哈希,
+                    'witness_address': 出块节点地址,
+                    'transaction_count': 交易数量,
+                    'confirmed': 是否已确认
+                }],
+                'transfers': {
+                    'trx': [{
+                        'block_number': 区块号,
+                        'timestamp': 时间戳,
+                        'txid': 交易哈希,
+                        'from': 发送地址,
+                        'to': 接收地址,
+                        'amount': 金额(TRX),
+                        'resource': {
+                            'energy_usage': 能量消耗,
+                            'net_usage': 带宽消耗,
+                            'energy_fee': 能量手续费,
+                            'net_fee': 带宽手续费
+                        }
+                    }],
+                    'usdt': [{
+                        'block_number': 区块号,
+                        'timestamp': 时间戳,
+                        'txid': 交易哈希,
+                        'from': 发送地址,
+                        'to': 接收地址,
+                        'amount': 金额(USDT),
+                        'resource': {
+                            'energy_usage': 能量消耗,
+                            'net_usage': 带宽消耗,
+                            'energy_fee': 能量手续费,
+                            'net_fee': 带宽手续费
+                        }
+                    }]
+                }
+            }
+        """
+        USDT_CONTRACT_ADDRESS = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        if end_block is None:
+            end_block = await self.get_latest_block_number()
+
+        result = {
+            'blocks': [],
+            'transfers': {
+                'trx': [],
+                'usdt': []
+            },
+            'stats': {
+                'total_transactions': 0,
+                'failed_parse': 0,
+                'successful_parse': 0,
+                'failed_txids': []  # 添加解析失败的交易ID列表
+            }
+        }
+
+        for block_num in range(start_block, end_block + 1):
+            block = await self.get_block(block_num)
+
+            # 添加区块信息
+            block_header = block['block_header']['raw_data']
+            result['blocks'].append({
+                'block_number': block_num,
+                'timestamp': block_header['timestamp'],
+                'hash': block.get('blockID', ''),
+                'parent_hash': block_header.get('parentHash', ''),
+                'witness_address': self.to_base58check_address(block_header.get('witness_address', '')),
+                'transaction_count': len(block.get('transactions', [])),
+                'confirmed': block.get('confirmed', True)
+            })
+
+            if not block.get('transactions'):
+                continue
+
+            for tx in block['transactions']:
+                # 检查TRX转账
+                if tx.get('raw_data', {}).get('contract', []):
+                    contract = tx['raw_data']['contract'][0]
+                    if contract['type'] == 'TransferContract':
+                        value = contract['parameter']['value']
+                        from_addr = self.to_base58check_address(value['owner_address'])
+                        to_addr = self.to_base58check_address(value['to_address'])
+                        amount = Decimal(value['amount']) / Decimal(10 ** 6)
+
+                        # 获取资源消耗
+                        resource = {}
+                        if 'ret' in tx and tx['ret']:
+                            receipt = tx['ret'][0]
+                            resource = {
+                                'energy_usage': receipt.get('energy_usage', 0),
+                                'net_usage': receipt.get('net_usage', 0),
+                                'energy_fee': receipt.get('energy_fee', 0),
+                                'net_fee': receipt.get('net_fee', 0),
+                            }
+
+                        if address is None or address in [from_addr, to_addr]:
+                            result['transfers']['trx'].append({
+                                'block_number': block_num,
+                                'timestamp': block_header['timestamp'],
+                                'txid': tx['txID'],
+                                'from': from_addr,
+                                'to': to_addr,
+                                'amount': amount,
+                                'resource': resource
+                            })
+
+                # 检查USDT转账
+                if tx.get('raw_data', {}).get('contract', []):
+                    contract = tx['raw_data']['contract'][0]
+                    if contract['type'] == 'TriggerSmartContract' and \
+                       self.to_base58check_address(contract['parameter']['value']['contract_address']) == USDT_CONTRACT_ADDRESS:
+                        result['stats']['total_transactions'] += 1
+                        transfer_info = await self.parse_usdt_transfer(tx, block_num, block_header['timestamp'])
+
+                        if transfer_info:
+                            # 获取资源消耗
+                            if 'ret' in tx and tx['ret']:
+                                receipt = tx['ret'][0]
+                                transfer_info['resource'] = {
+                                    'energy_usage': receipt.get('energy_usage', 0),
+                                    'net_usage': receipt.get('net_usage', 0),
+                                    'energy_fee': receipt.get('energy_fee', 0),
+                                    'net_fee': receipt.get('net_fee', 0),
+                                }
+
+                            result['stats']['successful_parse'] += 1
+                            if address is None or address in [transfer_info['from'], transfer_info['to']]:
+                                result['transfers']['usdt'].append(transfer_info)
+                        else:
+                            result['stats']['failed_parse'] += 1
+                            result['stats']['failed_txids'].append(tx['txID'])  # 记录解析失败的交易ID
+
+        return result
+
+    async def scan_recent_transfers(self, block_count: int = 1, address: str = None) -> dict:
+        """扫描最近N个区块的TRX和USDT转账记录
+
+        Args:
+            block_count: 要扫描的区块数量，例如：
+                        1 = 只扫描最新区块
+                        10 = 扫描最近10个区块
+            address: 可选，只返回与该地址相关的转账记录
+
+        Returns:
+            dict: 包含区块信息和转账记录
+            {
+                'latest_block': 最新区块号,
+                'start_block': 起始区块号,
+                'blocks': [{
+                    'block_number': 区块号,
+                    'timestamp': 时间戳,
+                    'hash': 区块哈希,
+                    'parent_hash': 父区块哈希,
+                    'witness_address': 出块节点地址,
+                    'transaction_count': 交易数量,
+                    'confirmed': 是否已确认
+                }],
+                'transfers': {
+                    'trx': [{
+                        'block_number': 区块号,
+                        'timestamp': 时间戳,
+                        'txid': 交易哈希,
+                        'from': 发送地址,
+                        'to': 接收地址,
+                        'amount': 金额(TRX),
+                        'resource': {
+                            'energy_usage': 能量消耗,
+                            'net_usage': 带宽消耗,
+                            'energy_fee': 能量手续费,
+                            'net_fee': 带宽手续费
+                        }
+                    }],
+                    'usdt': [{
+                        'block_number': 区块号,
+                        'timestamp': 时间戳,
+                        'txid': 交易哈希,
+                        'from': 发送地址,
+                        'to': 接收地址,
+                        'amount': 金额(USDT),
+                        'resource': {
+                            'energy_usage': 能量消耗,
+                            'net_usage': 带宽消耗,
+                            'energy_fee': 能量手续费,
+                            'net_fee': 带宽手续费
+                        }
+                    }]
+                }
+            }
+        """
+        latest_block = await self.get_latest_block_number()
+        start_block = max(latest_block - block_count + 1, 0)  # 确保不会小于0
+
+        result = await self.scan_block_transfers(start_block, latest_block, address)
+        result['latest_block'] = latest_block
+        result['start_block'] = start_block
+
+        return result
+
+    async def parse_usdt_transfer(self, tx: Dict[str, Any], block_num: int, block_timestamp: int) -> Optional[Dict[str, Any]]:
+        """解析USDT转账事件
+
+        Args:
+            tx: 交易数据
+            block_num: 区块号
+            block_timestamp: 区块时间戳
+
+        Returns:
+            Optional[Dict[str, Any]]: 解析后的转账信息，解析失败返回None
+        """
+        try:
+            contract = tx['raw_data']['contract'][0]
+            value = contract['parameter']['value']
+
+            # 解析合约调用数据
+            data = value.get('data', '')
+
+            # transfer方法
+            if data.startswith('a9059cbb'):
+                try:
+                    to_addr = self.to_base58check_address('41' + data[32:72])
+                    amount = int(data[72:], 16) / 10 ** 6  # USDT精度是6
+                    from_addr = self.to_base58check_address(value['owner_address'])
+                except Exception as e:
+                    return None
+
+            # transferFrom方法
+            elif data.startswith('23b872dd'):
+                try:
+                    from_addr = self.to_base58check_address('41' + data[32:72])
+                    to_addr = self.to_base58check_address('41' + data[72:112])
+                    amount = int(data[112:], 16) / 10 ** 6  # USDT精度是6
+                except Exception as e:
+                    return None
+            else:
+                return None  # 不是transfer或transferFrom方法
+
+            return {
+                'block_number': block_num,
+                'timestamp': block_timestamp,
+                'txid': tx['txID'],
+                'from': from_addr,
+                'to': to_addr,
+                'amount': amount,
+                'method': 'transfer' if data.startswith('a9059cbb') else 'transferFrom'
+            }
+
+        except Exception:
+            return
+
+
